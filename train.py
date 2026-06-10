@@ -163,6 +163,12 @@ def train(cfg: TrainConfig, resume: str | None = None) -> None:
         for pg in optimizer.param_groups:
             pg["lr"] = lr
 
+        # Disable z-loss after 31B tokens (GPT-X2 recipe)
+        tokens_so_far = step * cfg.batch_tokens
+        if tokens_so_far >= 31_000_000_000 and raw_model.cfg.z_loss_weight > 0:
+            raw_model.cfg.z_loss_weight = 0.0
+            print(f"  z-loss disabled at step {step} ({tokens_so_far/1e9:.1f}B tokens)")
+
         # ── gradient accumulation ─────────────────────────────────────────
         optimizer.zero_grad(set_to_none=True)
         loss_accum = 0.0
