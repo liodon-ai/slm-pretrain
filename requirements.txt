@@ -1,0 +1,6 @@
+torch>=2.3
+tokenizers>=0.19
+datasets>=2.19
+numpy>=1.26
+tqdm>=4.66
+wandb>=0.17     # optional, only needed if wandb=True in TrainConfig
