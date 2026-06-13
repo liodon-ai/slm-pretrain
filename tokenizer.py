@@ -7,6 +7,8 @@ Usage:
 
 from __future__ import annotations
 import os
+import time
+import logging
 from typing import Iterator
 
 from tokenizers import Tokenizer
@@ -15,6 +17,7 @@ from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 
+logger = logging.getLogger("tokenizer")
 
 SPECIAL_TOKENS = ["<|endoftext|>", "<|pad|>"]
 
@@ -25,6 +28,7 @@ def train_tokenizer(
     vocab_size: int = 8192,
     min_frequency: int = 2,
 ) -> "BPETokenizer":
+    logger.info("Initializing ByteLevel BPE tokenizer (vocab=%d)", vocab_size)
     tokenizer = Tokenizer(BPE(unk_token=None))
     tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
     tokenizer.decoder = ByteLevelDecoder()
@@ -36,11 +40,15 @@ def train_tokenizer(
         initial_alphabet=ByteLevel.alphabet(),
         show_progress=True,
     )
+    t0 = time.time()
+    logger.info("Starting tokenizer training...")
     tokenizer.train_from_iterator(text_iter, trainer=trainer)
+    elapsed = time.time() - t0
+    logger.info("Tokenizer training complete in %.1fs", elapsed)
 
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     tokenizer.save(save_path)
-    print(f"Tokenizer saved → {save_path}  (vocab={tokenizer.get_vocab_size()})")
+    logger.info("Tokenizer saved → %s  (vocab=%d)", save_path, tokenizer.get_vocab_size())
     return BPETokenizer(save_path)
 
 

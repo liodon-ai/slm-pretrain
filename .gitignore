@@ -1,0 +1,23 @@
+# large data / model artifacts
+data/
+checkpoints/
+hf_model/
+results/
+tokenizer.json
+
+# logs
+*.log
+*.jsonl
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# misc
+.DS_Store
+liodon_ai_logo.png

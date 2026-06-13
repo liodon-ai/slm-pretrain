@@ -10,12 +10,21 @@ from __future__ import annotations
 import argparse
 import shutil
 import os
+import time
+import logging
 import torch
 import torch.nn as nn
 
 from model import SLM, ModelConfig
 from configuration_slm import SLMConfig
 from modeling_slm import SLMForCausalLM
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("export")
 
 
 def load_training_checkpoint(path: str, device: str = "cpu") -> tuple[SLM, ModelConfig]:
@@ -50,9 +59,9 @@ def build_hf_model(train_model: SLM, train_cfg: ModelConfig) -> SLMForCausalLM:
     # Copy weights — state dict keys are identical between train and HF model
     missing, unexpected = hf_model.load_state_dict(train_model.state_dict(), strict=False)
     if missing:
-        print(f"  Warning: missing keys: {missing}")
+        logger.warning("  missing keys: %s", missing)
     if unexpected:
-        print(f"  Warning: unexpected keys: {unexpected}")
+        logger.warning("  unexpected keys: %s", unexpected)
 
     # Re-apply scaled residual init (not stored in state dict, already in weights,
     # but we verify the copy is correct by doing a parameter norm check)
@@ -70,10 +79,10 @@ def convert_tokenizer(tokenizer_json: str, out_dir: str) -> None:
             clean_up_tokenization_spaces = False,
         )
         tok.save_pretrained(out_dir)
-        print(f"  tokenizer saved → {out_dir}")
+        logger.info("  tokenizer saved → %s", out_dir)
     except Exception as e:
-        print(f"  Warning: could not save tokenizer: {e}")
-        print("  Copy tokenizer.json to the output dir manually.")
+        logger.warning("  could not save tokenizer: %s", e)
+        logger.warning("  Copy tokenizer.json to the output dir manually.")
 
 
 def export(
@@ -82,45 +91,50 @@ def export(
     tokenizer_json: str = "tokenizer.json",
     push_to: str | None = None,
 ) -> None:
+    t_start = time.time()
+    logger.info("=== Export to HuggingFace format ===")
     os.makedirs(out_dir, exist_ok=True)
-    print(f"Loading checkpoint: {checkpoint_path}")
+    logger.info("Loading checkpoint: %s", checkpoint_path)
     train_model, train_cfg = load_training_checkpoint(checkpoint_path)
+    logger.info("Checkpoint loaded.")
 
-    print("Building HF model…")
+    logger.info("Building HF model...")
     hf_model = build_hf_model(train_model, train_cfg)
 
     n = sum(p.numel() for p in hf_model.parameters())
-    print(f"  parameters: {n:,}  ({n/1e6:.3f}M)")
+    logger.info("  parameters: %d  (%.3fM)", n, n/1e6)
 
-    print("Saving model…")
+    logger.info("Saving model to %s...", out_dir)
     # Safetensors can't store shared tensors.  Clone head.weight so it's
     # a separate tensor on disk; __init__ re-ties them after loading.
     hf_model.head.weight = nn.Parameter(hf_model.embed.weight.data.clone())
     hf_model.save_pretrained(out_dir, safe_serialization=True)
+    logger.info("Model saved.")
 
     # Copy modeling code into the output dir so push_to_hub includes it
     for fname in ("configuration_slm.py", "modeling_slm.py"):
         src = os.path.join(os.path.dirname(__file__), fname)
         if os.path.exists(src):
             shutil.copy(src, os.path.join(out_dir, fname))
-            print(f"  copied {fname}")
+            logger.info("  copied %s", fname)
 
     if os.path.exists(tokenizer_json):
         convert_tokenizer(tokenizer_json, out_dir)
     else:
-        print(f"  tokenizer not found at {tokenizer_json!r} — skipping")
+        logger.warning("  tokenizer not found at %r — skipping", tokenizer_json)
 
-    print(f"\nHF model ready at: {out_dir}")
-    print(f"Load with:\n  from transformers import AutoModelForCausalLM")
-    print(f"  model = AutoModelForCausalLM.from_pretrained('{out_dir}', trust_remote_code=True)")
+    logger.info("HF model ready at: %s", out_dir)
+    logger.info("Load with: AutoModelForCausalLM.from_pretrained('%s', trust_remote_code=True)", out_dir)
 
     if push_to:
-        print(f"\nPushing to HuggingFace Hub as {push_to!r}…")
-        hf_model.push_to_hub(push_to, safe_serialization=True)
+        logger.info("Pushing to HuggingFace Hub as %r...", push_to)
+        hf_model.push_to_hub(push_to)
         from transformers import PreTrainedTokenizerFast
         tok = PreTrainedTokenizerFast.from_pretrained(out_dir)
         tok.push_to_hub(push_to)
-        print(f"Pushed → https://huggingface.co/{push_to}")
+        logger.info("Pushed → https://huggingface.co/%s", push_to)
+
+    logger.info("=== Export complete in %.1fs ===", time.time() - t_start)
 
 
 if __name__ == "__main__":

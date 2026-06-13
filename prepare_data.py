@@ -17,12 +17,21 @@ The script is resumable: existing shards are skipped.
 from __future__ import annotations
 import os
 import argparse
+import time
+import logging
 import numpy as np
 from pathlib import Path
 
 from datasets import load_dataset
 from tokenizer import BPETokenizer, train_tokenizer
 from config import TrainConfig
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("prepare_data")
 
 
 # ── Dataset registry ─────────────────────────────────────────────────────────
@@ -45,7 +54,7 @@ def _sample_docs(n: int) -> "Iterator[str]":
     per_source = {k: max(1, int(n * v)) for k, v in cfg.data_mix.items()}
     for name, count in per_source.items():
         hf_name, config, col = SOURCES[name]
-        print(f"  [{name}] sampling {count:,} docs for tokenizer training…")
+        logger.info("[%s] sampling %d docs for tokenizer training…", name, count)
         ds = load_dataset(hf_name, config, split="train", streaming=True, trust_remote_code=True)
         for i, row in enumerate(ds):
             if i >= count:
@@ -55,9 +64,9 @@ def _sample_docs(n: int) -> "Iterator[str]":
 
 def ensure_tokenizer(path: str, vocab_size: int, n_docs: int) -> BPETokenizer:
     if os.path.exists(path):
-        print(f"Tokenizer found at {path}, loading.")
+        logger.info("Tokenizer found at %s, loading.", path)
         return BPETokenizer(path)
-    print(f"Training tokenizer on ~{n_docs:,} docs…")
+    logger.info("Training tokenizer on ~%d docs…", n_docs)
     return train_tokenizer(_sample_docs(n_docs), save_path=path, vocab_size=vocab_size)
 
 
@@ -71,7 +80,11 @@ def _count_existing(source_dir: Path) -> tuple[int, int]:
 
 
 def prepare(cfg: TrainConfig) -> None:
+    t_start = time.time()
+    logger.info("=== Step 2: Data Preparation ===")
+    logger.info("Loading tokenizer from %s", cfg.tokenizer_path)
     tok = BPETokenizer(cfg.tokenizer_path)
+    logger.info("Tokenizer loaded (vocab=%d, eos_id=%d)", tok.vocab_size, tok.eos_id)
 
     for source_name, weight in cfg.data_mix.items():
         target_tokens = int(cfg.total_tokens * weight)
@@ -80,29 +93,39 @@ def prepare(cfg: TrainConfig) -> None:
 
         n_shards, written = _count_existing(source_dir)
         if written >= target_tokens:
-            print(f"[{source_name}] already complete ({written/1e9:.2f}B / {target_tokens/1e9:.2f}B tokens). Skipping.")
+            logger.info("[%s] already complete (%.2fB / %.2fB tokens). Skipping.",
+                        source_name, written/1e9, target_tokens/1e9)
             continue
 
-        print(f"\n[{source_name}] target={target_tokens/1e9:.2f}B tokens  already={written/1e9:.2f}B  remaining={( target_tokens-written)/1e9:.2f}B")
+        logger.info("[%s] target=%.2fB tokens  already=%.2fB  remaining=%.2fB",
+                    source_name, target_tokens/1e9, written/1e9, (target_tokens-written)/1e9)
 
         hf_name, config, col = SOURCES[source_name]
+        logger.info("[%s] loading dataset: %s (config=%s)", source_name, hf_name, config)
         ds = load_dataset(hf_name, config, split="train", streaming=True, trust_remote_code=True)
 
         buf:        list[int] = []
         shard_idx:  int       = n_shards
+        docs_processed = 0
+        t_source = time.time()
 
         for row in ds:
             if written >= target_tokens:
                 break
             ids = tok.encode(row[col], add_eos=True)
             buf.extend(ids)
+            docs_processed += 1
 
             while len(buf) >= SHARD_TOKENS:
                 _write_shard(buf[:SHARD_TOKENS], source_dir / f"shard_{shard_idx:05d}.bin")
                 buf        = buf[SHARD_TOKENS:]
                 written   += SHARD_TOKENS
                 shard_idx += 1
-                print(f"  {written/1e9:.2f}/{target_tokens/1e9:.2f}B tokens", flush=True)
+                elapsed = time.time() - t_source
+                tok_per_sec = written / elapsed if elapsed > 0 else 0
+                logger.info("[%s] %.2f/%.2fB tokens (%.1f%%)  %.0f tok/s  %d docs",
+                            source_name, written/1e9, target_tokens/1e9,
+                            100.0 * written / target_tokens, tok_per_sec, docs_processed)
                 if written >= target_tokens:
                     break
 
@@ -112,13 +135,17 @@ def prepare(cfg: TrainConfig) -> None:
             _write_shard(buf[:keep], source_dir / f"shard_{shard_idx:05d}.bin")
             written += keep
 
-        print(f"[{source_name}] done — {written/1e9:.2f}B tokens in {shard_idx + 1} shards")
+        elapsed = time.time() - t_source
+        logger.info("[%s] done — %.2fB tokens in %d shards (%.1fs, %d docs)",
+                    source_name, written/1e9, shard_idx + 1, elapsed, docs_processed)
+
+    logger.info("=== Data preparation complete in %.1fs ===", time.time() - t_start)
 
 
 def _write_shard(tokens: list[int], path: Path) -> None:
     arr = np.array(tokens, dtype=np.uint16)
     arr.tofile(path)
-    print(f"  wrote {path.name}  ({len(arr):,} tokens, {arr.nbytes/1024/1024:.0f} MB)")
+    logger.debug("  wrote %s  (%d tokens, %.0f MB)", path.name, len(arr), arr.nbytes/1024/1024)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

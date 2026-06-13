@@ -188,8 +188,8 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast:
         B, T = input_ids.shape
         x   = self.embed(input_ids)
-        cos = self.rope_cos[:T].to(x.device)
-        sin = self.rope_sin[:T].to(x.device)
+        cos = self.rope_cos[:T].to(dtype=x.dtype, device=x.device)
+        sin = self.rope_sin[:T].to(dtype=x.dtype, device=x.device)
 
         for block in self.blocks:
             x = block(x, cos, sin, attention_mask)

@@ -9,11 +9,14 @@ random aligned window of length seq_len+1, splitting it into x / y.
 from __future__ import annotations
 import os
 import random
+import logging
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import IterableDataset, DataLoader
+
+logger = logging.getLogger("data")
 
 
 class ShardedDataset(IterableDataset):
@@ -57,6 +60,9 @@ class ShardedDataset(IterableDataset):
         total_w = sum(w for _, w in self.weighted)
         self._paths   = [p for p, _ in self.weighted]
         self._weights = [w / total_w for _, w in self.weighted]  # normalised
+
+        logger.info("[data] %s: %d shards from %d sources, seed=%d",
+                    split, len(self._paths), total_sources, seed)
 
     # Called per DataLoader worker — each worker gets its own RNG seed
     def _make_rng(self) -> random.Random:

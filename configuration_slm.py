@@ -28,4 +28,6 @@ class SLMConfig(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         self.rope_theta              = rope_theta
         self.norm_eps                = norm_eps
+        # Alias expected by transformers internals (DynamicCache, etc.)
+        self.num_hidden_layers       = num_layers
         super().__init__(**kwargs)

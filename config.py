@@ -18,7 +18,7 @@ class TrainConfig:
     })
 
     # Token budget
-    total_tokens:      int = 75_000_000_000   # 75B
+    total_tokens:      int = 25_000_000_000   # 25B
     tokenizer_n_docs:  int = 2_000_000        # docs sampled to train the tokenizer
 
     # Sequence / batch

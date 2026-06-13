@@ -12,6 +12,7 @@ import os
 import json
 import math
 import time
+import logging
 import argparse
 from dataclasses import asdict
 
@@ -20,6 +21,13 @@ import torch
 from config import TrainConfig
 from model import SLM, ModelConfig
 from data import make_dataloader
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("train")
 
 
 # ── LR schedule ──────────────────────────────────────────────────────────────
@@ -52,7 +60,7 @@ def save_checkpoint(model: SLM, optimizer, step: int, cfg: TrainConfig) -> None:
         "model_cfg":  asdict(model.cfg),
     }, tmp)
     os.replace(tmp, path)
-    print(f"  checkpoint → {path}")
+    logger.info("  checkpoint → %s", path)
 
 
 def load_checkpoint(path: str, model: SLM, optimizer, device: str) -> int:
@@ -60,7 +68,7 @@ def load_checkpoint(path: str, model: SLM, optimizer, device: str) -> int:
     model.load_state_dict(ckpt["model"])
     optimizer.load_state_dict(ckpt["optimizer"])
     step = ckpt["step"]
-    print(f"Resumed from {path}  (step {step:,})")
+    logger.info("Resumed from %s  (step %d)", path, step)
     return step
 
 
@@ -91,20 +99,29 @@ def train(cfg: TrainConfig, resume: str | None = None) -> None:
     torch.manual_seed(cfg.seed)
     device   = cfg.device
     pt_dtype = {"bfloat16": torch.bfloat16, "float32": torch.float32}[cfg.dtype]
+    logger.info("=== SLM-10M Pretraining ===")
+    logger.info("device=%s  dtype=%s  compile=%s  seed=%d", device, cfg.dtype, cfg.compile, cfg.seed)
 
     # ── model ──────────────────────────────────────────────────────────────
+    logger.info("Initializing model...")
     model_cfg = ModelConfig()
     model     = SLM(model_cfg).to(device)
+    n_params = model.num_params()
+    logger.info("Model created: %d parameters (%.3fM)", n_params, n_params/1e6)
 
     raw_model = model   # reference before compile for checkpointing
     if cfg.compile:
-        print("Compiling model…")
+        logger.info("Compiling model with torch.compile...")
         model = torch.compile(model)
+        logger.info("Model compiled.")
 
     # ── optimizer ──────────────────────────────────────────────────────────
     # apply weight decay only to 2-D parameters (matrices); skip norms/biases
     decay_params   = [p for n, p in raw_model.named_parameters() if p.dim() >= 2]
     nodecay_params = [p for n, p in raw_model.named_parameters() if p.dim() < 2]
+    logger.info("Optimizer: AdamW (lr=%.1e, wd=%.2f, betas=(%.2f, %.2f))",
+                cfg.learning_rate, cfg.weight_decay, cfg.beta1, cfg.beta2)
+    logger.info("Parameters: %d decay, %d no-decay", len(decay_params), len(nodecay_params))
     try:
         optimizer = torch.optim.AdamW(
             [{"params": decay_params,   "weight_decay": cfg.weight_decay},
@@ -121,9 +138,13 @@ def train(cfg: TrainConfig, resume: str | None = None) -> None:
 
     start_step = 0
     if resume:
+        logger.info("Resuming from checkpoint: %s", resume)
         start_step = load_checkpoint(resume, raw_model, optimizer, device)
+    else:
+        logger.info("Fresh start (no resume)")
 
     # ── data ───────────────────────────────────────────────────────────────
+    logger.info("Loading data from %s (seq_len=%d, batch=%d)", cfg.data_dir, cfg.max_seq_len, cfg.micro_batch_size)
     train_loader = make_dataloader(
         cfg.data_dir, cfg.max_seq_len, cfg.micro_batch_size,
         mix=cfg.data_mix, seed=cfg.seed, split="train",
@@ -133,6 +154,7 @@ def train(cfg: TrainConfig, resume: str | None = None) -> None:
         mix=cfg.data_mix, seed=cfg.seed + 1, split="val",
     )
     train_iter = iter(train_loader)
+    logger.info("Data loaders ready.")
 
     # ── logging setup ──────────────────────────────────────────────────────
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
@@ -141,16 +163,17 @@ def train(cfg: TrainConfig, resume: str | None = None) -> None:
     if cfg.wandb:
         import wandb
         wandb.init(project=cfg.wandb_project, name=cfg.run_name, config=asdict(cfg))
+        logger.info("W&B initialized: project=%s, run=%s", cfg.wandb_project, cfg.run_name)
 
     n_params = raw_model.num_params()
-    print(f"\n{'='*62}")
-    print(f"  SLM Pretraining")
-    print(f"  parameters:    {n_params/1e6:.3f}M")
-    print(f"  total steps:   {cfg.total_steps:,}")
-    print(f"  batch tokens:  {cfg.batch_tokens:,}  (grad_accum={cfg.grad_accum_steps})")
-    print(f"  device:        {device}  dtype={cfg.dtype}  compile={cfg.compile}")
-    print(f"  data:          {cfg.data_dir}")
-    print(f"{'='*62}\n")
+    logger.info("=" * 62)
+    logger.info("  SLM Pretraining")
+    logger.info("  parameters:    %.3fM", n_params/1e6)
+    logger.info("  total steps:   %d", cfg.total_steps)
+    logger.info("  batch tokens:  %d  (grad_accum=%d)", cfg.batch_tokens, cfg.grad_accum_steps)
+    logger.info("  device:        %s  dtype=%s  compile=%s", device, cfg.dtype, cfg.compile)
+    logger.info("  data:          %s", cfg.data_dir)
+    logger.info("=" * 62)
 
     # ── main loop ──────────────────────────────────────────────────────────
     model.train()
@@ -203,9 +226,9 @@ def train(cfg: TrainConfig, resume: str | None = None) -> None:
                 "tokens":  tokens,
                 "pct":     round(pct, 3),
             }
-            print(
-                f"step {step:>7,} | loss {loss_accum:.4f} | lr {lr:.2e} | "
-                f"{tok_s/1e3:.1f}k tok/s | {pct:.1f}% | ETA {eta_h:.1f}h"
+            logger.info(
+                "step %d | loss %.4f | lr %.2e | %.1fk tok/s | %.1f%% | ETA %.1fh",
+                step, loss_accum, lr, tok_s/1e3, pct, eta_h
             )
             log_fh.write(json.dumps(row) + "\n")
             log_fh.flush()
@@ -217,7 +240,7 @@ def train(cfg: TrainConfig, resume: str | None = None) -> None:
         # ── validation ────────────────────────────────────────────────────
         if step > 0 and step % cfg.eval_every == 0:
             v_loss = eval_loss(model, val_loader, device, pt_dtype)
-            print(f"  val_loss: {v_loss:.4f}")
+            logger.info("  val_loss: %.4f", v_loss)
             log_fh.write(json.dumps({"step": step, "val_loss": round(v_loss, 4)}) + "\n")
             log_fh.flush()
             if cfg.wandb:
@@ -234,7 +257,7 @@ def train(cfg: TrainConfig, resume: str | None = None) -> None:
     if cfg.wandb:
         import wandb
         wandb.finish()
-    print("\nTraining complete.")
+    logger.info("Training complete.")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
