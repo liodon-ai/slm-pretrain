@@ -1,4 +1,4 @@
-# SLM-10M
+# Liodon AI SLM-10M
 
 A 9.97M-parameter causal language model targeting the
 [Open SLM Leaderboard](https://huggingface.co/spaces/AxiomicLabs/Open_SLM_Leaderboard) `<10M` tier.
